@@ -1,4 +1,4 @@
-name: Postal Memories iOS - FIRST IPA v6 SIGNULOUS INSTALL FIX
+name: Postal Memories iOS - FIRST IPA v7 ICON + DECAL FIX
 
 on:
   workflow_dispatch:
@@ -309,6 +309,19 @@ jobs:
 
           mkdir -p "$PROJECT/Assets/Editor"
 
+          echo "===== COPY ORIGINAL APK ICON ====="
+          ICON_SRC="work/android/res/dK.png"
+          if [ ! -f "$ICON_SRC" ]; then
+            ICON_SRC="$(find work/android/res -maxdepth 1 -type f -name '*.png' -size +40k -print | head -1 || true)"
+          fi
+
+          if [ -n "${ICON_SRC:-}" ] && [ -f "$ICON_SRC" ]; then
+            cp "$ICON_SRC" "$PROJECT/Assets/PostalMemoriesAppIcon.png"
+            echo "ICON_SOURCE=$ICON_SRC"
+          else
+            echo "WARNING: APK icon was not found; Unity fallback icon may be used."
+          fi
+
           cat > "$PROJECT/Assets/Editor/PostalMemoriesIOSBuild.cs" <<'CS'
           using System;
           using System.IO;
@@ -321,6 +334,9 @@ jobs:
           {
               public static void PerformBuild()
               {
+                  ConfigureAppIdentityAndIcon();
+                  FixKnownTransparentDecals();
+
                   string[] scenes = EditorBuildSettings.scenes
                       .Where(s => s != null && s.enabled && !string.IsNullOrWhiteSpace(s.path))
                       .Select(s => s.path)
@@ -362,9 +378,6 @@ jobs:
                       ScriptingImplementation.IL2CPP
                   );
 
-                  PlayerSettings.applicationIdentifier =
-                      "com.postalmemories.ios.port";
-
                   PlayerSettings.iOS.targetOSVersionString = "15.0";
 
                   BuildPlayerOptions options = new BuildPlayerOptions
@@ -386,6 +399,128 @@ jobs:
                           "Postal Memories iOS build failed: " + report.summary.result +
                           ", errors=" + report.summary.totalErrors
                       );
+              }
+
+              private static void ConfigureAppIdentityAndIcon()
+              {
+                  PlayerSettings.productName = "Postal Memories";
+                  PlayerSettings.applicationIdentifier =
+                      "com.postalmemories.ios.port";
+
+                  const string iconPath = "Assets/PostalMemoriesAppIcon.png";
+                  AssetDatabase.ImportAsset(iconPath, ImportAssetOptions.ForceUpdate);
+
+                  Texture2D icon = AssetDatabase.LoadAssetAtPath<Texture2D>(iconPath);
+                  if (icon == null)
+                  {
+                      Debug.LogWarning("POSTAL MEMORIES: APK app icon was not imported.");
+                      return;
+                  }
+
+                  int[] sizes = PlayerSettings.GetIconSizesForTargetGroup(
+                      BuildTargetGroup.iOS,
+                      IconKind.Application
+                  );
+
+                  Texture2D[] icons = new Texture2D[Math.Max(1, sizes.Length)];
+                  for (int i = 0; i < icons.Length; i++)
+                      icons[i] = icon;
+
+                  PlayerSettings.SetIconsForTargetGroup(
+                      BuildTargetGroup.iOS,
+                      icons,
+                      IconKind.Application
+                  );
+
+                  Debug.Log("POSTAL MEMORIES: original APK icon configured for iOS.");
+              }
+
+              private static void FixKnownTransparentDecals()
+              {
+                  string[] keys =
+                  {
+                      "graffity_aron",
+                      "3oposter",
+                      "_decal",
+                      "decalg"
+                  };
+
+                  int texturesFixed = 0;
+                  int materialsFixed = 0;
+
+                  foreach (string guid in AssetDatabase.FindAssets("t:Texture2D", new[] { "Assets" }))
+                  {
+                      string path = AssetDatabase.GUIDToAssetPath(guid);
+                      string name = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
+
+                      if (!keys.Any(k => name.Contains(k)))
+                          continue;
+
+                      TextureImporter importer = AssetImporter.GetAtPath(path) as TextureImporter;
+                      if (importer != null)
+                      {
+                          importer.alphaSource = TextureImporterAlphaSource.FromInput;
+                          importer.alphaIsTransparency = true;
+                          importer.SaveAndReimport();
+                          texturesFixed++;
+                          Debug.Log("POSTAL MEMORIES: decal alpha fixed: " + path);
+                      }
+                  }
+
+                  Shader transparentShader =
+                      Shader.Find("Unlit/Transparent") ??
+                      Shader.Find("Legacy Shaders/Transparent/Diffuse");
+
+                  if (transparentShader == null)
+                  {
+                      Debug.LogWarning("POSTAL MEMORIES: no transparent fallback shader found.");
+                      return;
+                  }
+
+                  foreach (string guid in AssetDatabase.FindAssets("t:Material", new[] { "Assets" }))
+                  {
+                      string path = AssetDatabase.GUIDToAssetPath(guid);
+                      Material mat = AssetDatabase.LoadAssetAtPath<Material>(path);
+                      if (mat == null)
+                          continue;
+
+                      bool target = false;
+                      Texture targetTexture = null;
+
+                      foreach (string prop in mat.GetTexturePropertyNames())
+                      {
+                          Texture tex = mat.GetTexture(prop);
+                          if (tex == null)
+                              continue;
+
+                          string texName = tex.name.ToLowerInvariant();
+                          if (keys.Any(k => texName.Contains(k)))
+                          {
+                              target = true;
+                              targetTexture = tex;
+                              break;
+                          }
+                      }
+
+                      if (!target)
+                          continue;
+
+                      mat.shader = transparentShader;
+                      if (targetTexture != null)
+                          mat.mainTexture = targetTexture;
+
+                      mat.renderQueue = 3000;
+                      EditorUtility.SetDirty(mat);
+                      materialsFixed++;
+
+                      Debug.Log("POSTAL MEMORIES: transparent decal material fixed: " + path);
+                  }
+
+                  AssetDatabase.SaveAssets();
+                  Debug.Log(
+                      "POSTAL MEMORIES DECAL FIX: textures=" + texturesFixed +
+                      ", materials=" + materialsFixed
+                  );
               }
 
               private static bool IsValidScene(string path)
@@ -424,7 +559,7 @@ jobs:
       - name: Upload recovered Unity project
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v6
+          name: Postal-Memories-Recovered-Unity-v7
           path: postal-recovered.tar.gz
           if-no-files-found: error
           retention-days: 1
@@ -434,7 +569,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovery-Diagnostics-v6
+          name: Postal-Memories-Recovery-Diagnostics-v7
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -457,7 +592,7 @@ jobs:
       - name: Download recovered Unity project
         uses: actions/download-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v6
+          name: Postal-Memories-Recovered-Unity-v7
           path: recovered-download
 
       - name: Extract recovered project
@@ -474,6 +609,12 @@ jobs:
           echo "===== RECOVERED PROJECT ====="
           cat recovered-project/ProjectSettings/ProjectVersion.txt
           find recovered-project/Assets -type f -name '*.unity' | head -100
+
+          if [ -f recovered-project/Assets/PostalMemoriesAppIcon.png ]; then
+            echo "===== UPSCALE APK ICON FOR iOS ====="
+            sips -z 1024 1024               recovered-project/Assets/PostalMemoriesAppIcon.png               --out recovered-project/Assets/PostalMemoriesAppIcon.png               >/dev/null
+            sips -g pixelWidth -g pixelHeight               recovered-project/Assets/PostalMemoriesAppIcon.png || true
+          fi
 
       - name: Setup Node 22
         uses: actions/setup-node@v4
@@ -881,17 +1022,17 @@ jobs:
           cp -R "$APP" output/Payload/PostalMemories.app
 
           cd output
-          /usr/bin/zip -qry Postal-Memories-iOS-v6-UNSIGNED.ipa Payload
+          /usr/bin/zip -qry Postal-Memories-iOS-v7-UNSIGNED.ipa Payload
           rm -rf Payload
 
-          ls -lh Postal-Memories-iOS-v6-UNSIGNED.ipa
+          ls -lh Postal-Memories-iOS-v7-UNSIGNED.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v6-Signulous
+          name: Postal-Memories-iOS-v7-Signulous
           path: |
-            output/Postal-Memories-iOS-v6-UNSIGNED.ipa
+            output/Postal-Memories-iOS-v7-UNSIGNED.ipa
             output/xcodebuild.log
             output/unity-build-macos.log
           if-no-files-found: error
@@ -911,7 +1052,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v6-Mac-Diagnostics
+          name: Postal-Memories-iOS-v7-Mac-Diagnostics
           path: output
           if-no-files-found: ignore
           retention-days: 7
