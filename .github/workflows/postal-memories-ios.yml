@@ -1,0 +1,1059 @@
+name: Postal Memories iOS - FIRST IPA v1
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/postal-memories-ios.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build_unity_ios:
+    name: 1. Recover Postal Memories + Build iOS Xcode
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+
+    env:
+      UNITY_EMAIL: ${{ secrets.UNITY_USERNAME }}
+      UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work tools recovered output build
+          mkdir -p work tools recovered output build
+
+          for cmd in curl jq unzip strings gh python3; do
+            command -v "$cmd" >/dev/null || {
+              echo "ERROR: missing tool: $cmd"
+              exit 1
+            }
+          done
+
+      - name: Download largest APK from newest GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="$(gh release list --limit 1 --json tagName --jq '.[0].tagName')"
+
+          if [ -z "$TAG" ]; then
+            echo "ERROR: No GitHub Release exists yet."
+            echo "Upload Postal Memories Android.apk to a GitHub Release, then run this workflow again."
+            exit 1
+          fi
+
+          echo "Using release: $TAG"
+
+          mkdir -p work/release
+          gh release download "$TAG" \
+            --dir work/release \
+            --pattern "*.apk"
+
+          APK="$(
+            find work/release -type f -iname '*.apk' -printf '%s %p\n' \
+              | sort -nr \
+              | head -1 \
+              | cut -d' ' -f2-
+          )"
+
+          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
+            echo "ERROR: No APK was found in the newest Release."
+            exit 1
+          fi
+
+          cp "$APK" work/PostalMemories.apk
+
+          echo "===== APK ====="
+          ls -lh work/PostalMemories.apk
+          echo "APK=$APK" | tee output/apk.txt
+
+      - name: Extract APK and detect Unity
+        id: inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/android
+          unzip -q work/PostalMemories.apk -d work/android
+
+          echo "===== APK ABI ====="
+          find work/android/lib -maxdepth 2 -type f -name '*.so' -print 2>/dev/null \
+            | tee output/native-libs.txt || true
+
+          # Postal Memories stores Unity player data in assets/bin/Data.
+          DATA_DIR=""
+
+          GGM="$(find work/android -type f -name globalgamemanagers -print | head -1 || true)"
+          if [ -n "$GGM" ]; then
+            DATA_DIR="$(dirname "$GGM")"
+          fi
+
+          if [ -z "$DATA_DIR" ] && [ -d "work/android/assets/bin/Data" ]; then
+            DATA_DIR="work/android/assets/bin/Data"
+          fi
+
+          if [ -z "$DATA_DIR" ]; then
+            DATA_UNITY3D="$(find work/android -type f -name 'data.unity3d' -print | head -1 || true)"
+            if [ -n "$DATA_UNITY3D" ]; then
+              DATA_DIR="$(dirname "$DATA_UNITY3D")"
+            fi
+          fi
+
+          if [ -z "$DATA_DIR" ]; then
+            BOOT="$(find work/android -type f -name boot.config -print | head -1 || true)"
+            if [ -n "$BOOT" ]; then
+              DATA_DIR="$(dirname "$BOOT")"
+            fi
+          fi
+
+          if [ -z "$DATA_DIR" ] || [ ! -d "$DATA_DIR" ]; then
+            echo "ERROR: Unity Data directory not found."
+            find work/android -maxdepth 5 -type f | head -400
+            exit 1
+          fi
+
+          echo "$DATA_DIR" > output/unity-data-dir.txt
+
+          echo "===== UNITY DATA DIR ====="
+          echo "$DATA_DIR"
+          find "$DATA_DIR" -maxdepth 2 -type f -print | head -250
+
+          VERSION=""
+
+          # This APK has data.unity3d and its header contains the exact engine version.
+          if [ -f "$DATA_DIR/data.unity3d" ]; then
+            VERSION="$(
+              strings "$DATA_DIR/data.unity3d" 2>/dev/null \
+                | grep -Eo '20[0-9]{2}\.[0-9]+\.[0-9]+[abfp][0-9]+' \
+                | head -1 || true
+            )"
+          fi
+
+          if [ -z "$VERSION" ]; then
+            while IFS= read -r f; do
+              CANDIDATE="$(
+                strings "$f" 2>/dev/null \
+                  | grep -Eo '20[0-9]{2}\.[0-9]+\.[0-9]+[abfp][0-9]+' \
+                  | head -1 || true
+              )"
+              if [ -n "$CANDIDATE" ]; then
+                VERSION="$CANDIDATE"
+                break
+              fi
+            done < <(find "$DATA_DIR" -maxdepth 2 -type f -size -64M -print)
+          fi
+
+          if [ -z "$VERSION" ]; then
+            VERSION="UNKNOWN"
+          fi
+
+          echo "Detected Unity version: $VERSION"
+
+          MANAGED="$(find "$DATA_DIR" -type f -path '*/Managed/Assembly-CSharp.dll' -print | head -1 || true)"
+          META="$(find work/android -type f -name global-metadata.dat -print | head -1 || true)"
+          IL2CPP="$(find work/android/lib -type f -name 'libil2cpp.so' -print | head -1 || true)"
+
+          if [ -n "$MANAGED" ]; then
+            BACKEND="MONO"
+          elif [ -n "$META" ] || [ -n "$IL2CPP" ]; then
+            BACKEND="IL2CPP"
+          else
+            BACKEND="UNKNOWN"
+          fi
+
+          {
+            echo "UNITY_VERSION=$VERSION"
+            echo "SCRIPT_BACKEND=$BACKEND"
+            echo "DATA_DIR=$DATA_DIR"
+            echo "GLOBALGAMEMANAGERS=${GGM:-NONE}"
+            echo "MANAGED=${MANAGED:-NONE}"
+            echo "GLOBAL_METADATA=${META:-NONE}"
+            echo "IL2CPP_LIB=${IL2CPP:-NONE}"
+          } | tee output/inspect.txt
+
+          echo "unity_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "backend=$BACKEND" >> "$GITHUB_OUTPUT"
+
+      - name: Download AssetRipper 2.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh api repos/AssetRipper/AssetRipper/releases/tags/2.0.0 \
+            --jq '.assets[].name' \
+            | tee output/assetripper-assets.txt
+
+          ASSET="$(
+            grep -Ei '^AssetRipper_linux_(x64|amd64|64).*(\.tar\.xz|\.zip)$' \
+              output/assetripper-assets.txt \
+              | head -1 || true
+          )"
+
+          if [ -z "$ASSET" ]; then
+            ASSET="$(
+              grep -Ei 'linux.*(x64|amd64|64).*(\.tar\.xz|\.zip)$' \
+                output/assetripper-assets.txt \
+                | head -1 || true
+            )"
+          fi
+
+          if [ -z "$ASSET" ]; then
+            echo "ERROR: Linux x64 AssetRipper package not found."
+            exit 1
+          fi
+
+          gh release download 2.0.0 \
+            -R AssetRipper/AssetRipper \
+            -p "$ASSET" \
+            -D tools
+
+          mkdir -p tools/assetripper
+
+          case "tools/$ASSET" in
+            *.tar.xz) tar -xJf "tools/$ASSET" -C tools/assetripper ;;
+            *.zip) unzip -q "tools/$ASSET" -d tools/assetripper ;;
+            *) echo "Unsupported AssetRipper archive"; exit 1 ;;
+          esac
+
+          RIPPER="$(
+            find tools/assetripper -type f \
+              \( -name 'AssetRipper.GUI.Free' \
+                 -o -name 'AssetRipper.GUI' \
+                 -o -name 'AssetRipper' \) \
+              | head -1
+          )"
+
+          if [ -z "$RIPPER" ]; then
+            echo "ERROR: AssetRipper executable not found."
+            find tools/assetripper -maxdepth 4 -type f | head -300
+            exit 1
+          fi
+
+          chmod +x "$RIPPER"
+          echo "$RIPPER" > output/assetripper-path.txt
+
+      - name: Recover Unity project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RIPPER="$(cat output/assetripper-path.txt)"
+          DATA_DIR="$(cat output/unity-data-dir.txt)"
+          PORT=3333
+          EXPORT_DIR="$PWD/recovered/PostalMemories"
+
+          mkdir -p "$EXPORT_DIR"
+
+          "$RIPPER" --headless --port "$PORT" \
+            > output/assetripper.log 2>&1 &
+
+          PID=$!
+
+          READY=0
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "ERROR: AssetRipper did not start."
+            tail -250 output/assetripper.log || true
+            exit 1
+          fi
+
+          LOAD_CODE="$(
+            curl -sS \
+              -o output/load-response.txt \
+              -w '%{http_code}' \
+              -H 'Content-Type: application/x-www-form-urlencoded' \
+              --data-urlencode "Path=$DATA_DIR" \
+              "http://127.0.0.1:${PORT}/LoadFolder"
+          )"
+
+          echo "LOAD_HTTP=$LOAD_CODE"
+
+          if [ "$LOAD_CODE" != "200" ] && [ "$LOAD_CODE" != "302" ]; then
+            cat output/load-response.txt || true
+            tail -250 output/assetripper.log || true
+            exit 1
+          fi
+
+          EXPORT_CODE="$(
+            curl -sS \
+              -o output/export-response.txt \
+              -w '%{http_code}' \
+              -H 'Content-Type: application/x-www-form-urlencoded' \
+              --data-urlencode "Path=$EXPORT_DIR" \
+              --data-urlencode 'CreateSubfolder=false' \
+              "http://127.0.0.1:${PORT}/Export/UnityProject"
+          )"
+
+          echo "EXPORT_HTTP=$EXPORT_CODE"
+
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+
+          if [ "$EXPORT_CODE" != "200" ] && [ "$EXPORT_CODE" != "302" ]; then
+            cat output/export-response.txt || true
+            tail -250 output/assetripper.log || true
+            exit 1
+          fi
+
+          PROJECT=""
+
+          if [ -d "$EXPORT_DIR/ExportedProject/Assets" ]; then
+            PROJECT="$EXPORT_DIR/ExportedProject"
+          elif [ -d "$EXPORT_DIR/Assets" ]; then
+            PROJECT="$EXPORT_DIR"
+          fi
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: recovered Unity project not found."
+            find "$EXPORT_DIR" -maxdepth 4 -type d | head -300
+            exit 1
+          fi
+
+          echo "$PROJECT" > output/project-path.txt
+
+          echo "===== RECOVERED PROJECT ====="
+          echo "$PROJECT"
+          find "$PROJECT/Assets" -type f -name '*.unity' | head -100
+
+      - name: Prepare recovered project for iOS
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="$(cat output/project-path.txt)"
+
+          echo "===== REMOVE ANDROID-ONLY NATIVE PLUGINS ====="
+          find "$PROJECT/Assets" -type f \
+            \( -iname '*.so' -o -iname '*.aar' -o -iname '*.jar' \) \
+            -print \
+            | tee output/removed-android-files.txt || true
+
+          find "$PROJECT/Assets" -type f \
+            \( -iname '*.so' -o -iname '*.aar' -o -iname '*.jar' \) \
+            -delete || true
+
+          rm -rf "$PROJECT/Assets/Plugins/Android" || true
+
+          VERSION_FILE="$PROJECT/ProjectSettings/ProjectVersion.txt"
+
+          if [ ! -f "$VERSION_FILE" ]; then
+            DETECTED="${{ steps.inspect.outputs.unity_version }}"
+
+            if [ "$DETECTED" = "UNKNOWN" ]; then
+              echo "ERROR: ProjectVersion.txt missing and Unity version could not be detected."
+              exit 1
+            fi
+
+            mkdir -p "$PROJECT/ProjectSettings"
+            printf 'm_EditorVersion: %s\n' "$DETECTED" > "$VERSION_FILE"
+          fi
+
+          echo "===== PROJECT VERSION ====="
+          cat "$VERSION_FILE"
+
+          DETECTED_VERSION="${{ steps.inspect.outputs.unity_version }}"
+          if [ "$DETECTED_VERSION" != "2023.2.20f1" ]; then
+            echo "ERROR: Expected Unity 2023.2.20f1 for this Postal Memories APK, got: $DETECTED_VERSION"
+            exit 1
+          fi
+          printf 'm_EditorVersion: 2023.2.20f1\n' > "$VERSION_FILE"
+
+          mkdir -p "$PROJECT/Assets/Editor"
+
+          cat > "$PROJECT/Assets/Editor/PostalMemoriesIOSBuild.cs" <<'CS'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using UnityEditor;
+          using UnityEditor.Build.Reporting;
+          using UnityEngine;
+
+          public static class PostalMemoriesIOSBuild
+          {
+              public static void PerformBuild()
+              {
+                  string[] scenes = EditorBuildSettings.scenes
+                      .Where(s => s != null && s.enabled && !string.IsNullOrWhiteSpace(s.path))
+                      .Select(s => s.path)
+                      .Where(IsValidScene)
+                      .Distinct()
+                      .ToArray();
+
+                  if (scenes.Length == 0)
+                  {
+                      scenes = AssetDatabase.FindAssets("t:Scene", new[] { "Assets" })
+                          .Select(AssetDatabase.GUIDToAssetPath)
+                          .Where(IsValidScene)
+                          .Distinct()
+                          .OrderBy(p => p)
+                          .ToArray();
+                  }
+
+                  if (scenes.Length == 0)
+                      throw new Exception("No valid Unity scenes were recovered.");
+
+                  Debug.Log("POSTAL MEMORIES IOS SCENES: " + scenes.Length);
+                  foreach (string scene in scenes)
+                      Debug.Log("SCENE: " + scene);
+
+                  EditorBuildSettings.scenes = scenes
+                      .Select(p => new EditorBuildSettingsScene(p, true))
+                      .ToArray();
+
+                  string output = Path.GetFullPath(
+                      Path.Combine(Application.dataPath, "../../build/iOS/PostalMemories-iOS")
+                  );
+
+                  Directory.CreateDirectory(output);
+
+                  PlayerSettings.SetScriptingBackend(
+                      BuildTargetGroup.iOS,
+                      ScriptingImplementation.IL2CPP
+                  );
+
+                  PlayerSettings.applicationIdentifier =
+                      "com.postalmemories.ios.port";
+
+                  PlayerSettings.iOS.targetOSVersionString = "15.0";
+
+                  BuildPlayerOptions options = new BuildPlayerOptions
+                  {
+                      scenes = scenes,
+                      locationPathName = output,
+                      target = BuildTarget.iOS,
+                      options = BuildOptions.None
+                  };
+
+                  BuildReport report = BuildPipeline.BuildPlayer(options);
+
+                  Debug.Log("POSTAL MEMORIES IOS RESULT: " + report.summary.result);
+                  Debug.Log("POSTAL MEMORIES IOS ERRORS: " + report.summary.totalErrors);
+                  Debug.Log("POSTAL MEMORIES IOS WARNINGS: " + report.summary.totalWarnings);
+
+                  if (report.summary.result != BuildResult.Succeeded)
+                      throw new Exception(
+                          "Postal Memories iOS build failed: " + report.summary.result +
+                          ", errors=" + report.summary.totalErrors
+                      );
+              }
+
+              private static bool IsValidScene(string path)
+              {
+                  if (string.IsNullOrWhiteSpace(path))
+                      return false;
+
+                  string normalized = path.Replace('\\', '/');
+
+                  if (!normalized.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                      return false;
+
+                  SceneAsset asset =
+                      AssetDatabase.LoadAssetAtPath<SceneAsset>(normalized);
+
+                  if (asset != null)
+                      return true;
+
+                  string root =
+                      Directory.GetParent(Application.dataPath).FullName;
+
+                  return File.Exists(Path.Combine(root, normalized));
+              }
+          }
+          CS
+
+          PROJECT="$(realpath "$PROJECT")"
+
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+
+          UNITY_VERSION="$(
+            sed -n 's/^m_EditorVersion:[[:space:]]*//p' "$VERSION_FILE" \
+              | head -1
+          )"
+
+          echo "unity_version=$UNITY_VERSION" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "RECOVERED_PROJECT=$PROJECT"
+            echo "UNITY_VERSION=$UNITY_VERSION"
+            echo "BACKEND=${{ steps.inspect.outputs.backend }}"
+            echo "SCENES=$(find "$PROJECT/Assets" -type f -name '*.unity' | wc -l)"
+            echo "CS_FILES=$(find "$PROJECT/Assets" -type f -name '*.cs' | wc -l)"
+          } | tee output/recovery-summary.txt
+
+      - name: Check Unity login secrets
+        shell: bash
+        run: |
+          set -e
+
+          if [ -z "${UNITY_EMAIL:-}" ]; then
+            echo "ERROR: UNITY_USERNAME secret is missing"
+            exit 1
+          fi
+
+          if [ -z "${UNITY_PASSWORD:-}" ]; then
+            echo "ERROR: UNITY_PASSWORD secret is missing"
+            exit 1
+          fi
+
+          echo "UNITY LOGIN SECRETS: OK"
+
+      - name: Setup Node 22 for Unity CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Unity CLI + Unity Hub
+        shell: bash
+        run: |
+          set -e
+
+          npm install -g @rage-against-the-pixel/unity-cli
+
+          sudo apt-get update -o Acquire::Retries=4 || true
+          sudo apt-get install -y \
+            ca-certificates \
+            curl \
+            gnupg \
+            xvfb \
+            libgbm1 \
+            libgtk-3-0 \
+            libnss3
+
+          sudo install -d -m 0755 /etc/apt/keyrings
+
+          curl -fsSL https://hub.unity3d.com/linux/keys/public \
+            | sudo gpg --dearmor \
+              -o /etc/apt/keyrings/unityhub.gpg
+
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/unityhub.gpg] https://hub.unity3d.com/linux/repos/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/unityhub.list >/dev/null
+
+          sudo apt-get update -o Acquire::Retries=4 || true
+          sudo apt-get install -y unityhub
+
+          HUB_CMD="$(command -v unityhub || true)"
+
+          if [ -z "$HUB_CMD" ]; then
+            echo "ERROR: unityhub command not found"
+            exit 1
+          fi
+
+          sudo mkdir -p /opt/unityhub
+
+          sudo tee /opt/unityhub/unityhub >/dev/null <<EOF
+          #!/bin/bash
+          exec xvfb-run -a "$HUB_CMD" --no-sandbox --headless "\$@"
+          EOF
+
+          sudo chmod +x /opt/unityhub/unityhub
+
+          # unity-cli internally spawns a binary literally named "unity-hub".
+          # Ubuntu's package installs "unityhub", so create both names.
+          sudo ln -sf /opt/unityhub/unityhub /usr/local/bin/unity-hub
+          sudo ln -sf /opt/unityhub/unityhub /usr/local/bin/unityhub-ci
+
+          echo "UNITY_HUB_PATH=/opt/unityhub/unityhub" >> "$GITHUB_ENV"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+          echo "/opt/unityhub" >> "$GITHUB_PATH"
+
+          echo "===== UNITY HUB COMMANDS ====="
+          command -v unityhub || true
+          command -v unity-hub
+          ls -l /usr/local/bin/unity-hub
+
+          UNITY_HUB_PATH=/opt/unityhub/unityhub unity-cli hub-version || true
+
+      - name: Prepare Unity Licensing Client
+        env:
+          UNITY_HUB_PATH: /opt/unityhub/unityhub
+        shell: bash
+        run: |
+          set -e
+
+          find_client() {
+            find /usr /opt "$HOME" \
+              -type f \
+              -name "Unity.Licensing.Client" \
+              2>/dev/null \
+              | head -1
+          }
+
+          CLIENT="$(find_client || true)"
+
+          if [ -z "$CLIENT" ]; then
+            echo "Licensing client not found in Hub package."
+            echo "Installing a small Unity editor copy so the licensing client exists."
+
+            UNITY_HUB_PATH=/opt/unityhub/unityhub \
+            unity-cli setup-unity \
+              --unity-project none \
+              --unity-version 2018.2.0f2 \
+              --changeset 787658998520 \
+              --build-targets iOS \
+              --modules ios \
+              --json
+
+            CLIENT="$(find_client || true)"
+          fi
+
+          if [ -z "$CLIENT" ]; then
+            echo "ERROR: Unity.Licensing.Client not found."
+            exit 1
+          fi
+
+          CLIENT_DIR="$(dirname "$CLIENT")"
+
+          sudo rm -rf /opt/unityhub/UnityLicensingClient
+          sudo mkdir -p /opt/unityhub/UnityLicensingClient
+          sudo cp -a "$CLIENT_DIR"/. /opt/unityhub/UnityLicensingClient/
+          sudo chmod +x /opt/unityhub/UnityLicensingClient/Unity.Licensing.Client || true
+
+          test -f /opt/unityhub/UnityLicensingClient/Unity.Licensing.Client
+
+      - name: Activate Unity Personal
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== ACTIVATE UNITY PERSONAL ====="
+
+          unity-cli activate-license \
+            --license personal \
+            --email "$UNITY_EMAIL" \
+            --password "$UNITY_PASSWORD" \
+            --json
+
+          echo "===== LICENSE CONTEXT ====="
+          unity-cli license-context || true
+
+          echo "UNITY PERSONAL ACTIVATION: SUCCESS"
+
+      - name: Install official Unity CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export UNITY_CLI_HOME="$PWD/tools/unity-official-cli"
+          export UNITY_CLI_CHANNEL="beta"
+          export UNITY_NON_INTERACTIVE=1
+          export UNITY_NO_CONSENT_PROMPT=1
+          export UNITY_NO_UPDATE_CHECK=1
+
+          rm -rf "$UNITY_CLI_HOME"
+          mkdir -p "$UNITY_CLI_HOME"
+
+          echo "===== INSTALL OFFICIAL UNITY CLI ====="
+          curl -fsSL --retry 5 --retry-delay 3 \
+            https://public-cdn.cloud.unity3d.com/hub/prod/cli/install.sh \
+            -o /tmp/unity-cli-install.sh
+
+          bash /tmp/unity-cli-install.sh
+
+          echo "$UNITY_CLI_HOME/bin" >> "$GITHUB_PATH"
+
+          UNITY="$UNITY_CLI_HOME/bin/unity"
+          if [ ! -x "$UNITY" ]; then
+            echo "ERROR: official Unity CLI binary was not installed."
+            find "$UNITY_CLI_HOME" -maxdepth 4 -type f -print || true
+            exit 1
+          fi
+
+          "$UNITY" --version
+          "$UNITY" --non-interactive --no-banner --no-color doctor --format json \
+            > output/unity-cli-doctor.json 2>&1 || true
+
+      - name: Install exact Unity Editor + iOS module with official CLI
+        id: unity_setup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.prepare.outputs.project }}"
+          VERSION="${{ steps.prepare.outputs.unity_version }}"
+          CHANGESET="0e25a174756c"
+          UNITY="$PWD/tools/unity-official-cli/bin/unity"
+          INSTALL_ROOT="$HOME/UnityEditors"
+
+          export UNITY_NON_INTERACTIVE=1
+          export UNITY_NO_CONSENT_PROMPT=1
+          export UNITY_NO_UPDATE_CHECK=1
+          export UNITY_INSTALL_RETRIES=3
+
+          echo "PROJECT=$PROJECT"
+          echo "UNITY_VERSION=$VERSION"
+          echo "CHANGESET=$CHANGESET"
+          echo "INSTALL_ROOT=$INSTALL_ROOT"
+
+          mkdir -p "$INSTALL_ROOT"
+
+          echo "===== SET EDITOR INSTALL PATH ====="
+          "$UNITY" --non-interactive --no-banner --no-color \
+            editors install-path --set "$INSTALL_ROOT"
+
+          echo "===== PREVIEW EXACT UNITY INSTALL ====="
+          "$UNITY" --non-interactive --no-banner --no-color \
+            install "$VERSION" \
+            --changeset "$CHANGESET" \
+            --module ios \
+            --no-child-modules \
+            --dry-run \
+            --yes \
+            --accept-eula \
+            2>&1 | tee output/unity-install-dry-run.log
+
+          echo "===== INSTALL EXACT UNITY + iOS MODULE ====="
+          set +e
+          timeout 45m "$UNITY" --non-interactive --no-banner --no-color \
+            install "$VERSION" \
+            --changeset "$CHANGESET" \
+            --module ios \
+            --no-child-modules \
+            --yes \
+            --accept-eula \
+            2>&1 | tee output/unity-install.log
+          RC=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$RC" -eq 124 ]; then
+            echo "ERROR: Unity install exceeded 45 minutes and was stopped."
+            exit 1
+          elif [ "$RC" -ne 0 ]; then
+            echo "ERROR: official Unity CLI install failed with exit code $RC."
+            exit "$RC"
+          fi
+
+          echo "===== INSTALLED EDITORS ====="
+          "$UNITY" --non-interactive --no-banner --no-color \
+            editors --installed --format json \
+            | tee output/unity-editors-installed.json
+
+          echo "===== RESOLVE EDITOR PATH ====="
+          PATH_JSON="$(
+            "$UNITY" --non-interactive --no-banner --no-color \
+              editors path "$VERSION" --format json
+          )"
+          printf '%s\n' "$PATH_JSON" | tee output/unity-editor-path.json
+
+          UNITY_ROOT="$(
+            printf '%s\n' "$PATH_JSON" \
+              | jq -r '
+                  .data.path
+                  // .data.installPath
+                  // (if (.data | type) == "string" then .data else empty end)
+                  // .path
+                  // empty
+                ' 2>/dev/null \
+              | head -1
+          )"
+
+          if [ -z "$UNITY_ROOT" ] || [ ! -d "$UNITY_ROOT" ]; then
+            echo "JSON path parse did not resolve an existing folder; searching install root."
+            UNITY_ROOT="$(
+              find "$INSTALL_ROOT" -maxdepth 4 -type f -path '*/Editor/Unity' -perm -111 \
+                -print 2>/dev/null \
+                | head -1 \
+                | xargs -r dirname \
+                | xargs -r dirname
+            )"
+          fi
+
+          UNITY_BIN=""
+          if [ -n "$UNITY_ROOT" ] && [ -x "$UNITY_ROOT/Editor/Unity" ]; then
+            UNITY_BIN="$UNITY_ROOT/Editor/Unity"
+          else
+            UNITY_BIN="$(
+              find "$INSTALL_ROOT" -maxdepth 6 -type f -path '*/Editor/Unity' -perm -111 \
+                -print 2>/dev/null \
+                | head -1 || true
+            )"
+          fi
+
+          if [ -z "$UNITY_BIN" ] || [ ! -x "$UNITY_BIN" ]; then
+            echo "ERROR: installed Unity Editor executable was not found."
+            find "$INSTALL_ROOT" -maxdepth 5 -print | head -500
+            exit 1
+          fi
+
+          UNITY_ROOT="$(dirname "$(dirname "$UNITY_BIN")")"
+          echo "$UNITY_BIN" > output/unity-bin.txt
+
+          echo "UNITY_ROOT=$UNITY_ROOT"
+          echo "UNITY_BIN=$UNITY_BIN"
+
+          echo "===== VERIFY iOS BUILD SUPPORT ====="
+          find "$UNITY_ROOT/Editor/Data/PlaybackEngines" -maxdepth 3 -type d -print 2>/dev/null \
+            | tee output/playback-engines.txt || true
+
+          if [ ! -d "$UNITY_ROOT/Editor/Data/PlaybackEngines/iOSSupport" ]; then
+            echo "ERROR: iOSSupport module is missing after official CLI install."
+            "$UNITY" --non-interactive --no-banner --no-color \
+              modules list "$VERSION" --format json \
+              > output/unity-modules.json 2>&1 || true
+            exit 1
+          fi
+
+          echo "OFFICIAL UNITY CLI INSTALL: SUCCESS"
+
+      - name: Build Unity iOS Xcode project
+        id: unity_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+
+          PROJECT="${{ steps.prepare.outputs.project }}"
+          UNITY_BIN="$(cat output/unity-bin.txt)"
+
+          echo "===== UNITY IOS BUILD ====="
+          echo "UNITY_BIN=$UNITY_BIN"
+          echo "PROJECT=$PROJECT"
+
+          xvfb-run -a "$UNITY_BIN" \
+            -batchmode \
+            -nographics \
+            -quit \
+            -projectPath "$PROJECT" \
+            -buildTarget iOS \
+            -executeMethod PostalMemoriesIOSBuild.PerformBuild \
+            -logFile - \
+            2>&1 | tee output/unity-build.log
+
+          RC=${PIPESTATUS[0]}
+          echo "UNITY_EXIT=$RC" | tee output/unity-exit.txt
+          exit "$RC"
+
+      - name: Locate Unity iOS Xcode output
+        id: xcode
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          PROJECT="${{ steps.prepare.outputs.project }}"
+
+          XCODE_DIR="$(
+            find "$PROJECT/../.." "$PWD/build" \
+              -type d -name '*.xcodeproj' -print 2>/dev/null \
+              | head -1 \
+              | xargs -r dirname
+          )"
+
+          if [ -n "$XCODE_DIR" ] && [ -d "$XCODE_DIR" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "$XCODE_DIR" > output/xcode-path.txt
+            echo "XCODE_DIR=$XCODE_DIR"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Xcode project not found."
+          fi
+
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          {
+            echo "POSTAL MEMORIES iOS FIRST IPA v1"
+            echo "======================"
+            echo
+            cat output/inspect.txt 2>/dev/null
+            echo
+            cat output/recovery-summary.txt 2>/dev/null
+            echo
+            echo "UNITY_BUILD_OUTCOME=${{ steps.unity_build.outcome }}"
+            echo "XCODE_READY=${{ steps.xcode.outputs.ready }}"
+          } > output/summary.txt
+
+          tail -400 output/assetripper.log \
+            > output/assetripper-tail.txt 2>/dev/null || true
+
+          echo "===== UNITY CLI EDITOR LOGS =====" > output/unity-editor-logs.txt
+          unity-cli editor-logs >> output/unity-editor-logs.txt 2>&1 || true
+
+          PROJECT="$(cat output/project-path.txt 2>/dev/null || true)"
+
+          if [ -n "$PROJECT" ]; then
+            find "$PROJECT/Assets" -type f -name '*.unity' \
+              > output/recovered-scenes.txt 2>/dev/null || true
+          fi
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Postal-Memories-iOS-Diagnostics-v1
+          path: output
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
+
+      - name: Stage Xcode project for packaging job
+        if: steps.xcode.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          XCODE_DIR="$(cat output/xcode-path.txt)"
+          rm -rf xcode-stage
+          mkdir -p xcode-stage
+          cp -a "$XCODE_DIR"/. xcode-stage/
+
+      - name: Upload staged Xcode project
+        if: steps.xcode.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Postal-Memories-iOS-Xcode-STAGED-v1
+          path: xcode-stage
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Fail clearly if Unity did not export Xcode
+        if: steps.xcode.outputs.ready != 'true'
+        shell: bash
+        run: |
+          echo "Unity did not export an iOS Xcode project."
+          echo "Download Postal-Memories-iOS-Diagnostics-v1 and send it to ChatGPT."
+          exit 1
+
+  package_ipa:
+    name: 2. Make Postal Memories unsigned IPA
+    needs: build_unity_ios
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Download Xcode project
+        uses: actions/download-artifact@v4
+        with:
+          name: Postal-Memories-iOS-Xcode-STAGED-v1
+          path: unity-ios
+
+      - name: Inspect Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== XCODE ====="
+          xcodebuild -version
+
+          PROJ="$(find unity-ios -type d -name '*.xcodeproj' | head -1)"
+
+          if [ -z "$PROJ" ]; then
+            echo "ERROR: .xcodeproj not found."
+            find unity-ios -maxdepth 5 -print | head -500
+            exit 1
+          fi
+
+          echo "$PROJ" > xcode-project.txt
+          xcodebuild -project "$PROJ" -list
+
+      - name: Build unsigned arm64 iPhone app
+        shell: bash
+        run: |
+          set -o pipefail
+
+          PROJ="$(cat xcode-project.txt)"
+
+          SCHEME="$(
+            xcodebuild -project "$PROJ" -list 2>/dev/null \
+              | awk '
+                  /Schemes:/ {inside=1; next}
+                  inside && NF {
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+                    print
+                    exit
+                  }
+                '
+          )"
+
+          if [ -z "$SCHEME" ]; then
+            SCHEME="Unity-iPhone"
+          fi
+
+          echo "SCHEME=$SCHEME"
+
+          rm -rf DerivedData output
+          mkdir -p output
+
+          xcodebuild \
+            -project "$PROJ" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$PWD/DerivedData" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+            PRODUCT_BUNDLE_IDENTIFIER="com.postalmemories.ios.port" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            ENABLE_BITCODE=NO \
+            build \
+            2>&1 | tee output/xcodebuild.log
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(
+            find DerivedData/Build/Products \
+              -type d -name '*.app' \
+              -path '*Release-iphoneos*' \
+              | head -1
+          )"
+
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "ERROR: built .app not found."
+            find DerivedData/Build/Products -maxdepth 5 -print | head -500
+            exit 1
+          fi
+
+          echo "APP=$APP"
+
+          rm -rf output/Payload
+          mkdir -p output/Payload
+          cp -R "$APP" output/Payload/PostalMemories.app
+
+          cd output
+          /usr/bin/zip -qry Postal-Memories-iOS-v1-UNSIGNED.ipa Payload
+          rm -rf Payload
+
+          ls -lh Postal-Memories-iOS-v1-UNSIGNED.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Postal-Memories-iOS-v1-Signulous
+          path: |
+            output/Postal-Memories-iOS-v1-UNSIGNED.ipa
+            output/xcodebuild.log
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
