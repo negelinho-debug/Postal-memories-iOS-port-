@@ -1,4 +1,4 @@
-name: Postal Memories iOS - FIRST IPA v4 iOS PATH FIX
+name: Postal Memories iOS - FIRST IPA v5 XCODE16 GAMEASSEMBLY FIX
 
 on:
   workflow_dispatch:
@@ -424,7 +424,7 @@ jobs:
       - name: Upload recovered Unity project
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v3
+          name: Postal-Memories-Recovered-Unity-v5
           path: postal-recovered.tar.gz
           if-no-files-found: error
           retention-days: 1
@@ -434,7 +434,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovery-Diagnostics-v3
+          name: Postal-Memories-Recovery-Diagnostics-v5
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -457,7 +457,7 @@ jobs:
       - name: Download recovered Unity project
         uses: actions/download-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v3
+          name: Postal-Memories-Recovered-Unity-v5
           path: recovered-download
 
       - name: Extract recovered project
@@ -681,6 +681,97 @@ jobs:
           find "$XCODE_DIR/Il2CppOutputProject" \
             -type f -name il2cpp -print 2>/dev/null || true
 
+      - name: Patch Unity 2023.2 GameAssembly paths for Xcode 16.3+
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          XCODE_DIR="$(cat output/xcode-dir.txt)"
+          PBX="$XCODE_DIR/Unity-iPhone.xcodeproj/project.pbxproj"
+
+          if [ ! -f "$PBX" ]; then
+            echo "ERROR: project.pbxproj not found: $PBX"
+            exit 1
+          fi
+
+          echo "===== XCODE VERSION ====="
+          xcodebuild -version
+
+          echo "===== PATCH GAMEASSEMBLY RUN SCRIPT ====="
+
+          python3 - "$PBX" <<'PY'
+          from pathlib import Path
+          import sys
+
+          pbx = Path(sys.argv[1])
+          s = pbx.read_text()
+          original = s
+
+          replacements = [
+              (
+                  r'ln -sF \"$PROJECT_DIR/Il2CppOutputProject\" \"$CONFIGURATION_TEMP_DIR/artifacts/arm64/buildstate\"',
+                  r'ln -sF \"$PROJECT_DIR/Il2CppOutputProject\" \"$CONFIGURATION_TEMP_DIR/artifacts/arm64/buildstate/Il2CppOutputProject\"'
+              ),
+              (
+                  r'ln -sF \"$PROJECT_DIR/Libraries\" \"$CONFIGURATION_TEMP_DIR/artifacts/arm64/buildstate\"',
+                  r'ln -sF \"$PROJECT_DIR/Libraries\" \"$CONFIGURATION_TEMP_DIR/artifacts/arm64/buildstate/Libraries\"'
+              ),
+              (
+                  'ln -sF "$PROJECT_DIR/Il2CppOutputProject" "$CONFIGURATION_TEMP_DIR/artifacts/arm64/buildstate"',
+                  'ln -sF "$PROJECT_DIR/Il2CppOutputProject" "$CONFIGURATION_TEMP_DIR/artifacts/arm64/buildstate/Il2CppOutputProject"'
+              ),
+              (
+                  'ln -sF "$PROJECT_DIR/Libraries" "$CONFIGURATION_TEMP_DIR/artifacts/arm64/buildstate"',
+                  'ln -sF "$PROJECT_DIR/Libraries" "$CONFIGURATION_TEMP_DIR/artifacts/arm64/buildstate/Libraries"'
+              ),
+          ]
+
+          changed = 0
+          for old, new in replacements:
+              if old in s:
+                  count = s.count(old)
+                  s = s.replace(old, new)
+                  changed += count
+
+          already_fixed = (
+              "buildstate/Il2CppOutputProject" in s
+              and "buildstate/Libraries" in s
+          )
+
+          if changed == 0 and not already_fixed:
+              print("ERROR: Could not find the Unity GameAssembly path lines to patch.")
+              print("Relevant project lines:")
+              for line in s.splitlines():
+                  if "Il2CppOutputProject" in line or "buildstate" in line:
+                      print(line[:1200])
+              raise SystemExit(1)
+
+          pbx.write_text(s)
+          print(f"GameAssembly path replacements: {changed}")
+          print(f"Patch present: {already_fixed or changed > 0}")
+          PY
+
+          echo "===== MAKE IL2CPP HOST TOOLS EXECUTABLE ====="
+          find "$XCODE_DIR/Il2CppOutputProject/IL2CPP/build" \
+            -type f \( -name 'il2cpp' -o -name 'il2cpp-compile' -o -name 'bee_backend' \) \
+            -exec chmod +x {} + 2>/dev/null || true
+
+          echo "===== VERIFY PATCH ====="
+          python3 - "$PBX" <<'PY'
+          from pathlib import Path
+          import sys
+          s = Path(sys.argv[1]).read_text()
+          required = [
+              "buildstate/Il2CppOutputProject",
+              "buildstate/Libraries",
+          ]
+          missing = [x for x in required if x not in s]
+          if missing:
+              print("ERROR: Missing patched paths:", missing)
+              raise SystemExit(1)
+          print("GameAssembly Xcode 16 path fix: OK")
+          PY
+
       - name: Build Unity-iPhone unsigned app
         shell: bash
         run: |
@@ -752,17 +843,17 @@ jobs:
           cp -R "$APP" output/Payload/PostalMemories.app
 
           cd output
-          /usr/bin/zip -qry Postal-Memories-iOS-v3-UNSIGNED.ipa Payload
+          /usr/bin/zip -qry Postal-Memories-iOS-v5-UNSIGNED.ipa Payload
           rm -rf Payload
 
-          ls -lh Postal-Memories-iOS-v3-UNSIGNED.ipa
+          ls -lh Postal-Memories-iOS-v5-UNSIGNED.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v3-Signulous
+          name: Postal-Memories-iOS-v5-Signulous
           path: |
-            output/Postal-Memories-iOS-v3-UNSIGNED.ipa
+            output/Postal-Memories-iOS-v5-UNSIGNED.ipa
             output/xcodebuild.log
             output/unity-build-macos.log
           if-no-files-found: error
@@ -782,7 +873,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v3-Mac-Diagnostics
+          name: Postal-Memories-iOS-v5-Mac-Diagnostics
           path: output
           if-no-files-found: ignore
           retention-days: 7
