@@ -1,4 +1,4 @@
-name: Postal Memories iOS - FIRST IPA v3 HUB FIX
+name: Postal Memories iOS - FIRST IPA v4 iOS PATH FIX
 
 on:
   workflow_dispatch:
@@ -585,13 +585,30 @@ jobs:
           echo "UNITY_BIN=$UNITY_BIN"
 
           UNITY_APP_ROOT="$(dirname "$(dirname "$(dirname "$UNITY_BIN")")")"
-          echo "UNITY_APP_ROOT=$UNITY_APP_ROOT"
+          EDITOR_ROOT="$(dirname "$UNITY_APP_ROOT")"
 
-          if [ ! -d "$UNITY_APP_ROOT/Contents/PlaybackEngines/iOSSupport" ]; then
+          echo "UNITY_APP_ROOT=$UNITY_APP_ROOT"
+          echo "EDITOR_ROOT=$EDITOR_ROOT"
+
+          # On macOS Hub-style installs, platform modules live next to Unity.app:
+          #   <version>/PlaybackEngines/iOSSupport
+          # not inside Unity.app/Contents/PlaybackEngines.
+          IOS_SUPPORT="$EDITOR_ROOT/PlaybackEngines/iOSSupport"
+
+          # Keep a fallback for alternate layouts.
+          if [ ! -d "$IOS_SUPPORT" ]; then
+            IOS_SUPPORT="$UNITY_APP_ROOT/Contents/PlaybackEngines/iOSSupport"
+          fi
+
+          if [ ! -d "$IOS_SUPPORT" ]; then
             echo "ERROR: iOSSupport module is missing."
-            find "$UNITY_APP_ROOT/Contents/PlaybackEngines" -maxdepth 3 -print || true
+            echo "===== EDITOR ROOT ====="
+            find "$EDITOR_ROOT" -maxdepth 4 -print | head -800 || true
             exit 1
           fi
+
+          echo "IOS_SUPPORT=$IOS_SUPPORT"
+          find "$IOS_SUPPORT" -maxdepth 2 -type f -print | head -100 || true
 
       - name: Build iOS Xcode project on macOS
         id: unity_build
