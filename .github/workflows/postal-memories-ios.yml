@@ -1,4 +1,4 @@
-name: Postal Memories iOS - FIRST IPA v5 XCODE16 GAMEASSEMBLY FIX
+name: Postal Memories iOS - FIRST IPA v6 SIGNULOUS INSTALL FIX
 
 on:
   workflow_dispatch:
@@ -424,7 +424,7 @@ jobs:
       - name: Upload recovered Unity project
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v5
+          name: Postal-Memories-Recovered-Unity-v6
           path: postal-recovered.tar.gz
           if-no-files-found: error
           retention-days: 1
@@ -434,7 +434,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovery-Diagnostics-v5
+          name: Postal-Memories-Recovery-Diagnostics-v6
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -457,7 +457,7 @@ jobs:
       - name: Download recovered Unity project
         uses: actions/download-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v5
+          name: Postal-Memories-Recovered-Unity-v6
           path: recovered-download
 
       - name: Extract recovered project
@@ -791,7 +791,6 @@ jobs:
             ARCHS=arm64
             ONLY_ACTIVE_ARCH=NO
             IPHONEOS_DEPLOYMENT_TARGET=15.0
-            PRODUCT_BUNDLE_IDENTIFIER=com.postalmemories.ios.port
             CODE_SIGNING_ALLOWED=NO
             CODE_SIGNING_REQUIRED=NO
             CODE_SIGN_IDENTITY=
@@ -818,6 +817,45 @@ jobs:
           RC=${PIPESTATUS[0]}
           exit "$RC"
 
+      - name: Verify app and framework bundle identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(
+            find DerivedData/Build/Products \
+              -type d -name '*.app' \
+              -path '*Release-iphoneos*' \
+              | head -1
+          )"
+
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "ERROR: built .app not found before verification."
+            exit 1
+          fi
+
+          APP_PLIST="$APP/Info.plist"
+          FW_PLIST="$APP/Frameworks/UnityFramework.framework/Info.plist"
+
+          APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PLIST")"
+          FW_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$FW_PLIST")"
+
+          echo "APP_BUNDLE_ID=$APP_ID"
+          echo "UNITYFRAMEWORK_BUNDLE_ID=$FW_ID"
+
+          if [ "$APP_ID" != "com.postalmemories.ios.port" ]; then
+            echo "ERROR: unexpected app bundle id: $APP_ID"
+            exit 1
+          fi
+
+          if [ "$FW_ID" = "$APP_ID" ]; then
+            echo "ERROR: UnityFramework has the same bundle id as the app."
+            echo "This can break signing/install on sideload services."
+            exit 1
+          fi
+
+          echo "Bundle identifiers are distinct: OK"
+
       - name: Package unsigned IPA
         shell: bash
         run: |
@@ -843,17 +881,17 @@ jobs:
           cp -R "$APP" output/Payload/PostalMemories.app
 
           cd output
-          /usr/bin/zip -qry Postal-Memories-iOS-v5-UNSIGNED.ipa Payload
+          /usr/bin/zip -qry Postal-Memories-iOS-v6-UNSIGNED.ipa Payload
           rm -rf Payload
 
-          ls -lh Postal-Memories-iOS-v5-UNSIGNED.ipa
+          ls -lh Postal-Memories-iOS-v6-UNSIGNED.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v5-Signulous
+          name: Postal-Memories-iOS-v6-Signulous
           path: |
-            output/Postal-Memories-iOS-v5-UNSIGNED.ipa
+            output/Postal-Memories-iOS-v6-UNSIGNED.ipa
             output/xcodebuild.log
             output/unity-build-macos.log
           if-no-files-found: error
@@ -873,7 +911,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v5-Mac-Diagnostics
+          name: Postal-Memories-iOS-v6-Mac-Diagnostics
           path: output
           if-no-files-found: ignore
           retention-days: 7
