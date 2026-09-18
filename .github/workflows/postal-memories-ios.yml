@@ -1,4 +1,4 @@
-name: Postal Memories iOS - FIRST IPA v7 ICON + DECAL FIX
+name: Postal Memories iOS - FIRST IPA v8 STAGE PLANE FIX
 
 on:
   workflow_dispatch:
@@ -326,6 +326,7 @@ jobs:
           using System;
           using System.IO;
           using System.Linq;
+          using System.Collections.Generic;
           using UnityEditor;
           using UnityEditor.Build.Reporting;
           using UnityEngine;
@@ -336,6 +337,7 @@ jobs:
               {
                   ConfigureAppIdentityAndIcon();
                   FixKnownTransparentDecals();
+                  FixKnownTransparentStagePlanes();
 
                   string[] scenes = EditorBuildSettings.scenes
                       .Where(s => s != null && s.enabled && !string.IsNullOrWhiteSpace(s.path))
@@ -523,6 +525,154 @@ jobs:
                   );
               }
 
+              private static void FixKnownTransparentStagePlanes()
+              {
+                  string[] materialKeys =
+                  {
+                      "spot",
+                      "light",
+                      "beam",
+                      "stage",
+                      "club",
+                      "dance",
+                      "scene",
+                      "party"
+                  };
+
+                  string[] objectKeys =
+                  {
+                      "spot",
+                      "light",
+                      "beam",
+                      "plane",
+                      "quad",
+                      "stage"
+                  };
+
+                  Shader transparentShader =
+                      Shader.Find("Unlit/Transparent") ??
+                      Shader.Find("Particles/Standard Unlit") ??
+                      Shader.Find("Legacy Shaders/Transparent/Diffuse");
+
+                  if (transparentShader == null)
+                  {
+                      Debug.LogWarning("POSTAL MEMORIES: no transparent shader found for stage-plane fix.");
+                      return;
+                  }
+
+                  int materialsFixed = 0;
+                  int renderersFixed = 0;
+
+                  foreach (string guid in AssetDatabase.FindAssets("t:Material", new[] { "Assets" }))
+                  {
+                      string path = AssetDatabase.GUIDToAssetPath(guid);
+                      Material mat = AssetDatabase.LoadAssetAtPath<Material>(path);
+                      if (mat == null)
+                          continue;
+
+                      string lowName = mat.name.ToLowerInvariant();
+                      bool target = materialKeys.Any(k => lowName.Contains(k));
+
+                      if (!target)
+                      {
+                          foreach (string prop in mat.GetTexturePropertyNames())
+                          {
+                              Texture tex = mat.GetTexture(prop);
+                              if (tex == null)
+                                  continue;
+
+                              string texName = tex.name.ToLowerInvariant();
+                              if (materialKeys.Any(k => texName.Contains(k)))
+                              {
+                                  target = true;
+                                  break;
+                              }
+                          }
+                      }
+
+                      if (!target)
+                          continue;
+
+                      mat.shader = transparentShader;
+                      mat.renderQueue = 3000;
+                      EditorUtility.SetDirty(mat);
+                      materialsFixed++;
+                      Debug.Log("POSTAL MEMORIES: stage-plane material fixed: " + path);
+                  }
+
+                  foreach (string sceneGuid in AssetDatabase.FindAssets("t:Scene", new[] { "Assets" }))
+                  {
+                      string scenePath = AssetDatabase.GUIDToAssetPath(sceneGuid);
+                      var scene = UnityEditor.SceneManagement.EditorSceneManager.OpenScene(
+                          scenePath,
+                          UnityEditor.SceneManagement.OpenSceneMode.Single
+                      );
+
+                      bool sceneDirty = false;
+
+                      foreach (Renderer renderer in Resources.FindObjectsOfTypeAll<Renderer>())
+                      {
+                          if (renderer == null || renderer.gameObject == null)
+                              continue;
+
+                          string rendererPath = GetHierarchyPath(renderer.transform).ToLowerInvariant();
+
+                          bool targetObject = objectKeys.Any(k => rendererPath.Contains(k));
+                          bool targetMaterial = false;
+
+                          foreach (Material mat in renderer.sharedMaterials)
+                          {
+                              if (mat == null)
+                                  continue;
+
+                              string lowName = mat.name.ToLowerInvariant();
+                              if (materialKeys.Any(k => lowName.Contains(k)))
+                              {
+                                  targetMaterial = true;
+                                  break;
+                              }
+                          }
+
+                          if (!targetObject && !targetMaterial)
+                              continue;
+
+                          renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                          renderer.receiveShadows = false;
+                          renderersFixed++;
+                          sceneDirty = true;
+                      }
+
+                      if (sceneDirty)
+                      {
+                          UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(scene);
+                          UnityEditor.SceneManagement.EditorSceneManager.SaveScene(scene);
+                          Debug.Log("POSTAL MEMORIES: stage-plane renderer fix saved for scene: " + scenePath);
+                      }
+                  }
+
+                  AssetDatabase.SaveAssets();
+                  Debug.Log(
+                      "POSTAL MEMORIES STAGE FIX: materials=" + materialsFixed +
+                      ", renderers=" + renderersFixed
+                  );
+              }
+
+              private static string GetHierarchyPath(Transform t)
+              {
+                  if (t == null)
+                      return string.Empty;
+
+                  List<string> parts = new List<string>();
+                  while (t != null)
+                  {
+                      parts.Add(t.name);
+                      t = t.parent;
+                  }
+
+                  parts.Reverse();
+                  return string.Join("/", parts);
+              }
+
               private static bool IsValidScene(string path)
               {
                   if (string.IsNullOrWhiteSpace(path))
@@ -559,7 +709,7 @@ jobs:
       - name: Upload recovered Unity project
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v7
+          name: Postal-Memories-Recovered-Unity-v8
           path: postal-recovered.tar.gz
           if-no-files-found: error
           retention-days: 1
@@ -569,7 +719,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovery-Diagnostics-v7
+          name: Postal-Memories-Recovery-Diagnostics-v8
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -592,7 +742,7 @@ jobs:
       - name: Download recovered Unity project
         uses: actions/download-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v7
+          name: Postal-Memories-Recovered-Unity-v8
           path: recovered-download
 
       - name: Extract recovered project
@@ -1022,17 +1172,17 @@ jobs:
           cp -R "$APP" output/Payload/PostalMemories.app
 
           cd output
-          /usr/bin/zip -qry Postal-Memories-iOS-v7-UNSIGNED.ipa Payload
+          /usr/bin/zip -qry Postal-Memories-iOS-v8-UNSIGNED.ipa Payload
           rm -rf Payload
 
-          ls -lh Postal-Memories-iOS-v7-UNSIGNED.ipa
+          ls -lh Postal-Memories-iOS-v8-UNSIGNED.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v7-Signulous
+          name: Postal-Memories-iOS-v8-Signulous
           path: |
-            output/Postal-Memories-iOS-v7-UNSIGNED.ipa
+            output/Postal-Memories-iOS-v8-UNSIGNED.ipa
             output/xcodebuild.log
             output/unity-build-macos.log
           if-no-files-found: error
@@ -1052,7 +1202,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v7-Mac-Diagnostics
+          name: Postal-Memories-iOS-v8-Mac-Diagnostics
           path: output
           if-no-files-found: ignore
           retention-days: 7
