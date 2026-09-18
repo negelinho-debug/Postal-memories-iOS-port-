@@ -1,4 +1,4 @@
-name: Postal Memories iOS - FIRST IPA v8 STAGE PLANE FIX
+name: Postal Memories iOS - FIRST IPA v9 MENU TITLE + WHITE SQUARE FIX
 
 on:
   workflow_dispatch:
@@ -338,6 +338,8 @@ jobs:
                   ConfigureAppIdentityAndIcon();
                   FixKnownTransparentDecals();
                   FixKnownTransparentStagePlanes();
+                  FixMenuLogoScale();
+                  FixBrokenWhiteSquares();
 
                   string[] scenes = EditorBuildSettings.scenes
                       .Where(s => s != null && s.enabled && !string.IsNullOrWhiteSpace(s.path))
@@ -673,6 +675,227 @@ jobs:
                   return string.Join("/", parts);
               }
 
+              private static void FixMenuLogoScale()
+              {
+                  string[] sceneKeys = { "menu", "main", "title", "start" };
+                  string[] objectKeys = { "postal", "memories", "logo", "title" };
+
+                  int objectsFixed = 0;
+
+                  foreach (string sceneGuid in AssetDatabase.FindAssets("t:Scene", new[] { "Assets" }))
+                  {
+                      string scenePath = AssetDatabase.GUIDToAssetPath(sceneGuid);
+                      string sceneName = Path.GetFileNameWithoutExtension(scenePath).ToLowerInvariant();
+
+                      bool sceneLooksLikeMenu = sceneKeys.Any(k => sceneName.Contains(k));
+                      var scene = UnityEditor.SceneManagement.EditorSceneManager.OpenScene(
+                          scenePath,
+                          UnityEditor.SceneManagement.OpenSceneMode.Single
+                      );
+
+                      bool sceneDirty = false;
+
+                      foreach (Transform t in Resources.FindObjectsOfTypeAll<Transform>())
+                      {
+                          if (t == null || t.gameObject == null)
+                              continue;
+
+                          string path = GetHierarchyPath(t).ToLowerInvariant();
+                          bool nameMatch = objectKeys.Any(k => path.Contains(k));
+
+                          if (!sceneLooksLikeMenu && !nameMatch)
+                              continue;
+
+                          if (!nameMatch)
+                              continue;
+
+                          bool changed = false;
+
+                          Vector3 scale = t.localScale;
+                          if (scale.x > 1.15f || scale.y > 1.15f || scale.z > 1.15f)
+                          {
+                              t.localScale = scale * 0.78f;
+                              changed = true;
+                          }
+
+                          Vector3 pos = t.localPosition;
+                          if (t.name.ToLowerInvariant().Contains("postal") ||
+                              t.name.ToLowerInvariant().Contains("memories") ||
+                              t.name.ToLowerInvariant().Contains("logo"))
+                          {
+                              t.localPosition = new Vector3(pos.x, pos.y - 0.15f, pos.z);
+                              changed = true;
+                          }
+
+                          RectTransform rt = t as RectTransform;
+                          if (rt != null)
+                          {
+                              Vector3 rScale = rt.localScale;
+                              if (rScale.x > 1.15f || rScale.y > 1.15f || rScale.z > 1.15f)
+                              {
+                                  rt.localScale = rScale * 0.78f;
+                                  changed = true;
+                              }
+                              rt.anchoredPosition += new Vector2(0f, -15f);
+                              changed = true;
+                          }
+
+                          if (changed)
+                          {
+                              EditorUtility.SetDirty(t);
+                              objectsFixed++;
+                              sceneDirty = true;
+                              Debug.Log("POSTAL MEMORIES: menu logo adjusted: " + path);
+                          }
+                      }
+
+                      if (sceneDirty)
+                      {
+                          UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(scene);
+                          UnityEditor.SceneManagement.EditorSceneManager.SaveScene(scene);
+                      }
+                  }
+
+                  AssetDatabase.SaveAssets();
+                  Debug.Log("POSTAL MEMORIES MENU LOGO FIX: objects=" + objectsFixed);
+              }
+
+              private static void FixBrokenWhiteSquares()
+              {
+                  string[] objectKeys =
+                  {
+                      "white",
+                      "square",
+                      "quad",
+                      "plane",
+                      "spot",
+                      "beam",
+                      "light",
+                      "stage"
+                  };
+
+                  int renderersFixed = 0;
+                  int materialsFixed = 0;
+
+                  foreach (string sceneGuid in AssetDatabase.FindAssets("t:Scene", new[] { "Assets" }))
+                  {
+                      string scenePath = AssetDatabase.GUIDToAssetPath(sceneGuid);
+                      var scene = UnityEditor.SceneManagement.EditorSceneManager.OpenScene(
+                          scenePath,
+                          UnityEditor.SceneManagement.OpenSceneMode.Single
+                      );
+
+                      bool sceneDirty = false;
+
+                      foreach (Renderer renderer in Resources.FindObjectsOfTypeAll<Renderer>())
+                      {
+                          if (renderer == null || renderer.gameObject == null)
+                              continue;
+
+                          string path = GetHierarchyPath(renderer.transform).ToLowerInvariant();
+                          bool nameHit = objectKeys.Any(k => path.Contains(k));
+
+                          bool materialLooksBroken = false;
+                          foreach (Material mat in renderer.sharedMaterials)
+                          {
+                              if (mat == null)
+                                  continue;
+
+                              string matName = mat.name.ToLowerInvariant();
+                              if (objectKeys.Any(k => matName.Contains(k)))
+                                  materialLooksBroken = true;
+
+                              if (mat.mainTexture == null)
+                              {
+                                  Color c = Color.white;
+                                  if (mat.HasProperty("_Color"))
+                                      c = mat.color;
+
+                                  if (c.r > 0.9f && c.g > 0.9f && c.b > 0.9f)
+                                      materialLooksBroken = true;
+                              }
+                          }
+
+                          if (!nameHit && !materialLooksBroken)
+                              continue;
+
+                          bool disable = false;
+                          foreach (Material mat in renderer.sharedMaterials)
+                          {
+                              if (mat == null)
+                                  continue;
+
+                              if (mat.mainTexture == null)
+                              {
+                                  Color c = Color.white;
+                                  if (mat.HasProperty("_Color"))
+                                      c = mat.color;
+
+                                  if (c.r > 0.9f && c.g > 0.9f && c.b > 0.9f)
+                                      disable = true;
+                              }
+
+                              if (mat.name.ToLowerInvariant().Contains("white"))
+                                  disable = true;
+                          }
+
+                          if (disable)
+                          {
+                              renderer.enabled = false;
+                              EditorUtility.SetDirty(renderer);
+                              renderersFixed++;
+                              sceneDirty = true;
+                              Debug.Log("POSTAL MEMORIES: disabled broken white square: " + path);
+                              continue;
+                          }
+
+                          Shader transparentShader =
+                              Shader.Find("Unlit/Transparent") ??
+                              Shader.Find("Particles/Standard Unlit") ??
+                              Shader.Find("Legacy Shaders/Transparent/Diffuse");
+
+                          foreach (Material mat in renderer.sharedMaterials)
+                          {
+                              if (mat == null)
+                                  continue;
+
+                              if (transparentShader != null)
+                              {
+                                  mat.shader = transparentShader;
+                                  if (mat.HasProperty("_Color"))
+                                  {
+                                      Color c = mat.color;
+                                      c.a = 0.25f;
+                                      mat.color = c;
+                                  }
+                                  mat.renderQueue = 3000;
+                                  EditorUtility.SetDirty(mat);
+                                  materialsFixed++;
+                                  sceneDirty = true;
+                              }
+                          }
+
+                          renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                          renderer.receiveShadows = false;
+                          EditorUtility.SetDirty(renderer);
+                          renderersFixed++;
+                          sceneDirty = true;
+                      }
+
+                      if (sceneDirty)
+                      {
+                          UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(scene);
+                          UnityEditor.SceneManagement.EditorSceneManager.SaveScene(scene);
+                      }
+                  }
+
+                  AssetDatabase.SaveAssets();
+                  Debug.Log(
+                      "POSTAL MEMORIES WHITE SQUARE FIX: renderers=" + renderersFixed +
+                      ", materials=" + materialsFixed
+                  );
+              }
+
               private static bool IsValidScene(string path)
               {
                   if (string.IsNullOrWhiteSpace(path))
@@ -709,7 +932,7 @@ jobs:
       - name: Upload recovered Unity project
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v8
+          name: Postal-Memories-Recovered-Unity-v9
           path: postal-recovered.tar.gz
           if-no-files-found: error
           retention-days: 1
@@ -719,7 +942,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovery-Diagnostics-v8
+          name: Postal-Memories-Recovery-Diagnostics-v9
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -742,7 +965,7 @@ jobs:
       - name: Download recovered Unity project
         uses: actions/download-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v8
+          name: Postal-Memories-Recovered-Unity-v9
           path: recovered-download
 
       - name: Extract recovered project
@@ -1172,17 +1395,17 @@ jobs:
           cp -R "$APP" output/Payload/PostalMemories.app
 
           cd output
-          /usr/bin/zip -qry Postal-Memories-iOS-v8-UNSIGNED.ipa Payload
+          /usr/bin/zip -qry Postal-Memories-iOS-v9-UNSIGNED.ipa Payload
           rm -rf Payload
 
-          ls -lh Postal-Memories-iOS-v8-UNSIGNED.ipa
+          ls -lh Postal-Memories-iOS-v9-UNSIGNED.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v8-Signulous
+          name: Postal-Memories-iOS-v9-Signulous
           path: |
-            output/Postal-Memories-iOS-v8-UNSIGNED.ipa
+            output/Postal-Memories-iOS-v9-UNSIGNED.ipa
             output/xcodebuild.log
             output/unity-build-macos.log
           if-no-files-found: error
@@ -1202,7 +1425,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v8-Mac-Diagnostics
+          name: Postal-Memories-iOS-v9-Mac-Diagnostics
           path: output
           if-no-files-found: ignore
           retention-days: 7
