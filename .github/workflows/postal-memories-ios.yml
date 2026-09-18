@@ -1,4 +1,4 @@
-name: Postal Memories iOS - FIRST IPA v2 MAC BUILD
+name: Postal Memories iOS - FIRST IPA v3 HUB FIX
 
 on:
   workflow_dispatch:
@@ -424,7 +424,7 @@ jobs:
       - name: Upload recovered Unity project
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v2
+          name: Postal-Memories-Recovered-Unity-v3
           path: postal-recovered.tar.gz
           if-no-files-found: error
           retention-days: 1
@@ -434,7 +434,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-Recovery-Diagnostics-v2
+          name: Postal-Memories-Recovery-Diagnostics-v3
           path: output
           if-no-files-found: ignore
           retention-days: 7
@@ -457,7 +457,7 @@ jobs:
       - name: Download recovered Unity project
         uses: actions/download-artifact@v4
         with:
-          name: Postal-Memories-Recovered-Unity-v2
+          name: Postal-Memories-Recovered-Unity-v3
           path: recovered-download
 
       - name: Extract recovered project
@@ -480,13 +480,34 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install Unity Hub for licensing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm install -g @rage-against-the-pixel/unity-cli
+
+          echo "===== INSTALL UNITY HUB ====="
+          unity-cli hub-install --json
+
+          echo "===== UNITY HUB ====="
+          unity-cli hub-path || true
+          unity-cli hub-version || true
+
       - name: Activate Unity Personal on macOS
-        uses: RageAgainstThePixel/activate-unity-license@v2
-        with:
-          license: Personal
-          username: ${{ secrets.UNITY_USERNAME }}
-          password: ${{ secrets.UNITY_PASSWORD }}
-          license-version: 6.x
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== ACTIVATE UNITY PERSONAL ====="
+          unity-cli activate-license \
+            --license personal \
+            --email "$UNITY_EMAIL" \
+            --password "$UNITY_PASSWORD" \
+            --json
+
+          echo "===== LICENSE CONTEXT ====="
+          unity-cli license-context || true
 
       - name: Install official Unity CLI
         shell: bash
@@ -714,28 +735,37 @@ jobs:
           cp -R "$APP" output/Payload/PostalMemories.app
 
           cd output
-          /usr/bin/zip -qry Postal-Memories-iOS-v2-UNSIGNED.ipa Payload
+          /usr/bin/zip -qry Postal-Memories-iOS-v3-UNSIGNED.ipa Payload
           rm -rf Payload
 
-          ls -lh Postal-Memories-iOS-v2-UNSIGNED.ipa
+          ls -lh Postal-Memories-iOS-v3-UNSIGNED.ipa
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v2-Signulous
+          name: Postal-Memories-iOS-v3-Signulous
           path: |
-            output/Postal-Memories-iOS-v2-UNSIGNED.ipa
+            output/Postal-Memories-iOS-v3-UNSIGNED.ipa
             output/xcodebuild.log
             output/unity-build-macos.log
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
 
+      - name: Return Unity Personal license
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if command -v unity-cli >/dev/null 2>&1; then
+            unity-cli return-license --license personal || true
+          fi
+
       - name: Upload macOS diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Postal-Memories-iOS-v2-Mac-Diagnostics
+          name: Postal-Memories-iOS-v3-Mac-Diagnostics
           path: output
           if-no-files-found: ignore
           retention-days: 7
